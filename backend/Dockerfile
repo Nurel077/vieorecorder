@@ -2,11 +2,14 @@ FROM python:3.10
 
 WORKDIR /app
 
-COPY . .
+# Сначала копируем requirements.txt для кэширования
+COPY backend/requirements.txt .
 
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Очень важно! Рабочая директория — там, где main.py
+# Затем копируем весь проект
+COPY . .
+
 WORKDIR /app/backend
 
-CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

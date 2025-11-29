@@ -1,16 +1,14 @@
-from fastapi import FastAPI, UploadFile, File, Depends, HTTPException
+from fastapi import FastAPI, HTTPException
+from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-from sqlalchemy.orm import Session
-import uuid, os, shutil, datetime
-from . import models, database
+from typing import List
+import os
+import json
 
-UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "..", "uploads")
-os.makedirs(UPLOAD_DIR, exist_ok=True)
+app = FastAPI(title="Telegram Video WebApp")
 
-app = FastAPI(title="Telegram Video WebApp Backend")
-
+# CORS для фронтенда
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -19,60 +17,94 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
+# Пути к файлам
+current_dir = os.path.dirname(os.path.abspath(__file__))
+webapp_dir = os.path.join(current_dir, "../webapp")
+data_file = os.path.join(current_dir, "videos.json")
 
-def get_db():
-    db = database.SessionLocal()
+# Пример данных видео
+sample_videos = [
+    {
+        "id": 1,
+        "title": "Big Buck Bunny",
+        "url": "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4",
+        "description": "Большой кролик Бак"
+    },
+    {
+        "id": 2,
+        "title": "Elephant Dream", 
+        "url": "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4",
+        "description": "Слон в мечтах"
+    },
+    {
+        "id": 3,
+        "title": "For Bigger Blazes",
+        "url": "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4",
+        "description": "Для больших вспышек"
+    }
+]
+
+# Создаем файл с видео если его нет
+def init_videos_file():
+    if not os.path.exists(data_file):
+        with open(data_file, 'w', encoding='utf-8') as f:
+            json.dump(sample_videos, f, ensure_ascii=False, indent=2)
+
+# Раздаем статические файлы
+app.mount("/static", StaticFiles(directory=webapp_dir), name="static")
+
+@app.get("/")
+async def read_root():
+    return FileResponse(os.path.join(webapp_dir, "index.html"))
+
+@app.get("/api/health")
+async def health_check():
+    return {"status": "ok", "message": "Server is running"}
+
+@app.get("/api/videos", response_model=List[dict])
+async def get_videos():
     try:
-        yield db
-    finally:
-        db.close()
+        with open(data_file, 'r', encoding='utf-8') as f:
+            videos = json.load(f)
+        return videos
+    except FileNotFoundError:
+        return sample_videos
 
+@app.get("/api/videos/{video_id}")
+async def get_video(video_id: int):
+    try:
+        with open(data_file, 'r', encoding='utf-8') as f:
+            videos = json.load(f)
+        
+        video = next((v for v in videos if v["id"] == video_id), None)
+        if not video:
+            raise HTTPException(status_code=404, detail="Video not found")
+        return video
+    except FileNotFoundError:
+        video = next((v for v in sample_videos if v["id"] == video_id), None)
+        if not video:
+            raise HTTPException(status_code=404, detail="Video not found")
+        return video
+
+@app.post("/api/videos")
+async def add_video(video: dict):
+    try:
+        with open(data_file, 'r', encoding='utf-8') as f:
+            videos = json.load(f)
+    except FileNotFoundError:
+        videos = sample_videos.copy()
+    
+    # Генерируем новый ID
+    new_id = max([v["id"] for v in videos]) + 1 if videos else 1
+    video["id"] = new_id
+    videos.append(video)
+    
+    with open(data_file, 'w', encoding='utf-8') as f:
+        json.dump(videos, f, ensure_ascii=False, indent=2)
+    
+    return {"message": "Video added", "video": video}
+
+# Инициализируем файл с видео при запуске
 @app.on_event("startup")
-def startup():
-    models.Base.metadata.create_all(bind=database.engine)
-
-@app.post("/upload")
-async def upload_video(file: UploadFile = File(...), db: Session = Depends(get_db)):
-    if not file.content_type.startswith("video/"):
-        raise HTTPException(status_code=400, detail="Only video files allowed")
-
-    ext = os.path.splitext(file.filename)[1]
-    file_id = f"{uuid.uuid4().hex}{ext}"
-    file_path = os.path.join(UPLOAD_DIR, file_id)
-
-    with open(file_path, "wb") as f:
-        shutil.copyfileobj(file.file, f)
-
-    video = models.Video(
-        file_id=file_id,
-        filename=file.filename,
-        content_type=file.content_type,
-        created_at=datetime.datetime.utcnow()
-    )
-    db.add(video)
-    db.commit()
-    db.refresh(video)
-
-    return {"status": "ok", "file_id": file_id}
-
-@app.get("/videos")
-def videos(db: Session = Depends(get_db)):
-    arr = db.query(models.Video).order_by(models.Video.created_at.desc()).all()
-    return [
-        {
-            "id": v.id,
-            "file_id": v.file_id,
-            "filename": v.filename,
-            "url": f"/uploads/{v.file_id}",
-            "created_at": v.created_at.isoformat()
-        }
-        for v in arr
-    ]
-
-@app.get("/video/{file_id}")
-def serve_file(file_id: str):
-    fp = os.path.join(UPLOAD_DIR, file_id)
-    if not os.path.exists(fp):
-        raise HTTPException(status_code=404, detail="Not found")
-    return FileResponse(fp)
+async def startup_event():
+    init_videos_file()
